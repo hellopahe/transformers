@@ -122,9 +122,7 @@ class DPTConfig(PretrainedConfig):
         pooler_output_size (`int`, *optional*):
            Dimensionality of the pooler layer. If None, defaults to `hidden_size`.
         pooler_act (`str`, *optional*, defaults to `"tanh"`):
-           The activation function to be used by the pooler. Keys of ACT2FN are supported for Flax and
-           Pytorch, and elements of https://www.tensorflow.org/api_docs/python/tf/keras/activations are
-           supported for Tensorflow.
+           The activation function to be used by the pooler.
 
     Example:
 
@@ -202,9 +200,7 @@ class DPTConfig(PretrainedConfig):
             if isinstance(backbone_config, dict):
                 logger.info("Initializing the config with a `BiT` backbone.")
                 backbone_config = BitConfig(**backbone_config)
-            elif isinstance(backbone_config, PretrainedConfig):
-                backbone_config = backbone_config
-            else:
+            elif not isinstance(backbone_config, PretrainedConfig):
                 raise ValueError(
                     f"backbone_config must be a dictionary or a `PretrainedConfig`, got {backbone_config.__class__}."
                 )
@@ -294,7 +290,11 @@ class DPTConfig(PretrainedConfig):
 
     @property
     def sub_configs(self):
-        return {"backbone_config": type(self.backbone_config)} if self.backbone_config is not None else {}
+        return (
+            {"backbone_config": type(self.backbone_config)}
+            if getattr(self, "backbone_config", None) is not None
+            else {}
+        )
 
 
 __all__ = ["DPTConfig"]

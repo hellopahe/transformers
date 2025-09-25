@@ -158,7 +158,7 @@ class DepthProConfig(PretrainedConfig):
         self.patch_model_config = patch_model_config
         self.fov_model_config = fov_model_config
 
-        for sub_config_key in self.sub_configs.keys():
+        for sub_config_key in self.sub_configs:
             sub_config = getattr(self, sub_config_key)
 
             if sub_config is None:
@@ -188,7 +188,6 @@ class DepthProConfig(PretrainedConfig):
                     sub_config.update({"image_size": patch_size})
                 sub_config = CONFIG_MAPPING[sub_config["model_type"]](**sub_config)
             elif isinstance(sub_config, PretrainedConfig):
-                sub_config = sub_config
                 image_size = getattr(sub_config, "image_size", None)
                 if image_size != patch_size:
                     raise ValueError(

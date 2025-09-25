@@ -51,8 +51,7 @@ class RetrievAugLMMarginOutput(ModelOutput):
         Score between each retrieved document embeddings (see `retrieved_doc_embeds`) and
         `question_encoder_last_hidden_state`.
     past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-        List of `torch.FloatTensor` of length `config.n_layers`, with each tensor of shape `(2, batch_size,
-        num_heads, sequence_length, embed_size_per_head)`).
+        It is a [`~cache_utils.Cache`] instance. For more details, see our [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache).
 
         Contains precomputed hidden-states (key and values in the attention blocks) of the decoder that can be used
         (see `past_key_values` input) to speed up sequential decoding.
@@ -142,8 +141,7 @@ class RetrievAugLMOutput(ModelOutput):
         Score between each retrieved document embeddings (see `retrieved_doc_embeds`) and
         `question_encoder_last_hidden_state`.
     past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-        List of `torch.FloatTensor` of length `config.n_layers`, with each tensor of shape `(2, batch_size,
-        num_heads, sequence_length, embed_size_per_head)`).
+        It is a [`~cache_utils.Cache`] instance. For more details, see our [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache).
 
         Contains precomputed hidden-states (key and values in the attention blocks) of the decoder that can be used
         (see `past_key_values` input) to speed up sequential decoding.
@@ -259,10 +257,6 @@ class RagPreTrainedModel(PreTrainedModel):
                     - A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
                     - A path to a *directory* containing model weights saved using
                       [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
-                    - A path or url to a *tensorflow index checkpoint file* (e.g, `./tf_model/model.ckpt.index`). In
-                      this case, `from_tf` should be set to `True` and a configuration object should be provided as
-                      `config` argument. This loading path is slower than converting the TensorFlow checkpoint in a
-                      PyTorch model using the provided conversion scripts and loading the PyTorch model afterwards.
 
             generator_pretrained_model_name_or_path (`str`, *optional*, defaults to `None`):
                 Information necessary to initiate the generator. Can be either:
@@ -270,10 +264,6 @@ class RagPreTrainedModel(PreTrainedModel):
                     - A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
                     - A path to a *directory* containing model weights saved using
                       [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
-                    - A path or url to a *tensorflow index checkpoint file* (e.g, `./tf_model/model.ckpt.index`). In
-                      this case, `from_tf` should be set to `True` and a configuration object should be provided as
-                      `config` argument. This loading path is slower than converting the TensorFlow checkpoint in a
-                      PyTorch model using the provided conversion scripts and loading the PyTorch model afterwards.
 
             model_args (remaining positional arguments, *optional*):
                 All remaining positional arguments will be passed to the underlying model's `__init__` method.
@@ -318,9 +308,9 @@ class RagPreTrainedModel(PreTrainedModel):
         }
 
         # remove question_encoder, generator kwargs from kwargs
-        for key in kwargs_question_encoder.keys():
+        for key in kwargs_question_encoder:
             del kwargs["question_encoder_" + key]
-        for key in kwargs_generator.keys():
+        for key in kwargs_generator:
             del kwargs["generator_" + key]
 
         # Load and initialize the question_encoder and generator
@@ -370,7 +360,7 @@ class RagPreTrainedModel(PreTrainedModel):
             )
 
         # instantiate config with corresponding kwargs
-        config = kwargs.get("config", None)
+        config = kwargs.get("config")
         if config is None:
             config = RagConfig.from_question_encoder_generator_configs(
                 question_encoder.config, generator.config, **kwargs
@@ -1204,8 +1194,6 @@ class RagTokenForGeneration(RagPreTrainedModel, GenerationMixin):
         if isinstance(past_key_values, EncoderDecoderCache):
             reordered_past = EncoderDecoderCache.from_legacy_cache(reordered_past)
 
-        if isinstance(past_key_values, EncoderDecoderCache):
-            reordered_past = EncoderDecoderCache.from_legacy_cache(reordered_past)
         return reordered_past
 
     def marginalize(self, seq_logits, doc_scores, n_docs=None):
@@ -1568,10 +1556,9 @@ class RagTokenForGeneration(RagPreTrainedModel, GenerationMixin):
         self._prepare_cache_for_generation(
             generation_config,
             model_kwargs,
-            assistant_model=None,
+            generation_mode=None,
             batch_size=input_ids.shape[0],
             max_cache_length=generation_config.max_length - 1,
-            device=input_ids.device,
         )
 
         if generation_config.num_beams == 1:
@@ -1593,13 +1580,6 @@ class RagTokenForGeneration(RagPreTrainedModel, GenerationMixin):
             if generation_config.num_return_sequences > generation_config.num_beams:
                 raise ValueError("`num_return_sequences` has to be smaller or equal to `num_beams`.")
 
-            # 11. interleave input_ids with `num_beams` additional sequences per batch
-            input_ids, model_kwargs = self._expand_inputs_for_generation(
-                input_ids=input_ids,
-                expand_size=generation_config.num_beams,
-                is_encoder_decoder=self.config.is_encoder_decoder,
-                **model_kwargs,
-            )
             return self._beam_search(
                 input_ids,
                 logits_processor=pre_processor,

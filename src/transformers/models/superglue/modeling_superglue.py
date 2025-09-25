@@ -44,7 +44,7 @@ def concat_pairs(tensor_tuple0: tuple[torch.Tensor], tensor_tuple1: tuple[torch.
     Returns:
         (`tuple[torch.Tensor]`): Tuple of concatenated tensors.
     """
-    return tuple([torch.cat([tensor0, tensor1]) for tensor0, tensor1 in zip(tensor_tuple0, tensor_tuple1)])
+    return tuple(torch.cat([tensor0, tensor1]) for tensor0, tensor1 in zip(tensor_tuple0, tensor_tuple1))
 
 
 def normalize_keypoints(keypoints: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -274,7 +274,7 @@ class SuperGlueSelfAttention(nn.Module):
         # such that the encoder's padding tokens are not attended to.
         is_cross_attention = encoder_hidden_states is not None
         current_states = encoder_hidden_states if is_cross_attention else hidden_states
-        attention_mask = encoder_attention_mask if is_cross_attention else encoder_attention_mask
+        attention_mask = encoder_attention_mask if is_cross_attention else attention_mask
 
         batch_size = hidden_states.shape[0]
         key_layer = (
@@ -524,8 +524,6 @@ class SuperGluePreTrainedModel(PreTrainedModel):
     def _init_weights(self, module: nn.Module) -> None:
         """Initialize the weights"""
         if isinstance(module, (nn.Linear, nn.Conv2d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -676,8 +674,10 @@ class SuperGlueForKeypointMatching(SuperGluePreTrainedModel):
 
         if mask is not None:
             mask = mask.reshape(batch_size, 2, num_keypoints)
-            mask0 = mask[:, 0].unsqueeze(-1).expand(-1, -1, num_keypoints)
-            scores = scores.masked_fill(mask0 == 0, -1e9)
+            mask0 = mask[:, 0].unsqueeze(2)
+            mask1 = mask[:, 1].unsqueeze(1)
+            mask = torch.logical_and(mask0, mask1)
+            scores = scores.masked_fill(mask == 0, torch.finfo(scores.dtype).min)
 
         # Run the optimal transport.
         scores = log_optimal_transport(scores, self.bin_score, iterations=self.config.sinkhorn_iterations)

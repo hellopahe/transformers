@@ -83,9 +83,7 @@ class ColPaliConfig(PretrainedConfig):
                     f"The model type `{vlm_config['model_type']}` is not supported. Please provide a valid model type."
                 )
             vlm_config = CONFIG_MAPPING[vlm_config["model_type"]](**vlm_config)
-        elif isinstance(vlm_config, PretrainedConfig):
-            vlm_config = vlm_config
-        else:
+        elif not isinstance(vlm_config, PretrainedConfig):
             raise TypeError(
                 f"Invalid type for `vlm_config`. Expected `PretrainedConfig`, `dict`, or `None`, but got {type(vlm_config)}."
             )
@@ -93,7 +91,7 @@ class ColPaliConfig(PretrainedConfig):
         self.vlm_config = vlm_config
         self.text_config = text_config if text_config is not None else vlm_config.text_config
         if isinstance(self.text_config, dict):
-            text_config["model_type"] = text_config["model_type"] if "model_type" in text_config else "gemma"
+            text_config["model_type"] = text_config.get("model_type", "gemma")
             self.text_config = CONFIG_MAPPING[text_config["model_type"]](**text_config)
 
         self.embedding_dim = embedding_dim

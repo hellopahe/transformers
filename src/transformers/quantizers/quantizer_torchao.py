@@ -35,6 +35,17 @@ if is_torch_available():
     import torch
     import torch.nn as nn
 
+if is_torchao_available():
+    import torchao
+
+    if version.parse(importlib.metadata.version("torchao")) >= version.parse("0.14.0"):
+        from torchao.prototype.safetensors.safetensors_support import (
+            flatten_tensor_state_dict,
+            unflatten_tensor_state_dict,
+        )
+        from torchao.prototype.safetensors.safetensors_utils import is_metadata_torchao
+
+
 logger = logging.get_logger(__name__)
 
 
@@ -81,6 +92,15 @@ def _linear_extra_repr(self):
         return f"in_features={self.weight.shape[1]}, out_features={self.weight.shape[0]}, weight={weight}"
 
 
+if is_torchao_available():
+    SUPPORTED_SAFE_SERIALIZATION_CONFIGS = [
+        torchao.quantization.Float8WeightOnlyConfig,
+        torchao.quantization.Float8DynamicActivationFloat8WeightConfig,
+    ]
+
+    TORCHAO_VERSION = version.parse(importlib.metadata.version("torchao"))
+
+
 class TorchAoHfQuantizer(HfQuantizer):
     """
     Quantizer for torchao: https://github.com/pytorch/ao/
@@ -98,18 +118,17 @@ class TorchAoHfQuantizer(HfQuantizer):
             raise ImportError("Loading an torchao quantized model requires torchao library (`pip install torchao`)")
 
         self.offload = False
-        device_map = kwargs.get("device_map", None)
+        device_map = kwargs.get("device_map")
         if isinstance(device_map, dict):
-            if "cpu" in device_map.values() or "disk" in device_map.values():
-                if self.pre_quantized:
+            if ("disk" in device_map.values() or "cpu" in device_map.values()) and len(device_map) > 1:
+                self.offload = True
+                if self.pre_quantized and "disk" in device_map.values():
                     raise ValueError(
-                        "You are attempting to perform cpu/disk offload with a pre-quantized torchao model "
-                        "This is not supported yet . Please remove the CPU or disk device from the device_map."
+                        "You are attempting to perform disk offload with a pre-quantized torchao model "
+                        "This is not supported yet . Please remove the disk device from the device_map."
                     )
-                else:
-                    self.offload = True
         if self.pre_quantized:
-            weights_only = kwargs.get("weights_only", None)
+            weights_only = kwargs.get("weights_only")
             if weights_only:
                 torch_version = version.parse(importlib.metadata.version("torch"))
                 if torch_version < version.parse("2.5.0"):
@@ -118,27 +137,42 @@ class TorchAoHfQuantizer(HfQuantizer):
                         f" You can also set with `weights_only=False` in `from_pretrained` if you don't want to update torch"
                     )
 
-    def update_torch_dtype(self, torch_dtype):
+    def update_dtype(self, dtype):
         if self.quantization_config.quant_type == "int4_weight_only":
-            if torch_dtype is not None and torch_dtype != torch.bfloat16:
+            if dtype is not None and dtype != torch.bfloat16:
                 logger.warning_once(
-                    f"Setting torch_dtype to {torch_dtype} for int4_weight_only quantization, but only bfloat16 is supported right now. Please set the torch_dtype to bfloat16."
+                    f"Setting dtype to {dtype} for int4_weight_only quantization, but only bfloat16 is supported right now. Please set the dtype to bfloat16."
                 )
-            if torch_dtype is None:
+            if dtype is None:
                 logger.warning_once(
-                    "Setting torch_dtype to torch.bfloat16 for int4_weight_only quantization since only bfloat16 is supported right now. Please set torch_dtype=torch.bfloat16 to remove this warning."
+                    "Setting dtype to torch.bfloat16 for int4_weight_only quantization since only bfloat16 is supported right now. Please set dtype=torch.bfloat16 to remove this warning."
                 )
-                torch_dtype = torch.bfloat16
+                dtype = torch.bfloat16
         if self.quantization_config.quant_type == "int8_dynamic_activation_int8_weight":
-            if torch_dtype is None:
+            if dtype is None:
                 logger.info(
-                    "Setting torch_dtype to torch.float32 for int8_dynamic_activation_int8_weight quantization as no torch_dtype was specified in from_pretrained"
+                    "Setting dtype to torch.float32 for int8_dynamic_activation_int8_weight quantization as no dtype was specified in from_pretrained"
                 )
-                # we need to set the torch_dtype, otherwise we have dtype mismatch when performing the quantized linear op
-                torch_dtype = torch.float32
-        return torch_dtype
+                # we need to set the dtype, otherwise we have dtype mismatch when performing the quantized linear op
+                dtype = torch.float32
+        return dtype
 
-    def adjust_target_dtype(self, torch_dtype: "torch.dtype") -> "torch.dtype":
+    def get_state_dict_and_metadata(self, model, safe_serialization: Optional[bool] = False):
+        """
+        If the model is safe serializable, we flatten the state dict of tensor subclasses so that it is compatible with
+        the safetensors format.
+        """
+        if type(self.quantization_config.quant_type) in SUPPORTED_SAFE_SERIALIZATION_CONFIGS and safe_serialization:
+            if TORCHAO_VERSION >= version.parse("0.14.0"):
+                return flatten_tensor_state_dict(model.state_dict())
+            else:
+                raise RuntimeError(
+                    f"In order to use safetensors with torchao, please use torchao version >= 0.14.0. Current version: {TORCHAO_VERSION}"
+                )
+        else:
+            return super().get_state_dict_and_metadata(model)
+
+    def adjust_target_dtype(self, dtype: "torch.dtype") -> "torch.dtype":
         if version.parse(importlib.metadata.version("accelerate")) > version.parse("0.19.0"):
             from accelerate.utils import CustomDtype
 
@@ -280,6 +314,16 @@ class TorchAoHfQuantizer(HfQuantizer):
 
             quantize_(module, self.quantization_config.get_apply_tensor_subclass())
 
+    def update_state_dict_with_metadata(self, state_dict, metadata):
+        """
+        If the metadata contains torchao tensor subclass information, we reconstruct the tensor subclass state dict
+        from the provided state_dict and metadata.
+        """
+        if TORCHAO_VERSION >= version.parse("0.14.0") and is_metadata_torchao(metadata):
+            return unflatten_tensor_state_dict(state_dict, metadata)
+        else:
+            return super().update_state_dict_with_metadata(state_dict, metadata)
+
     def _process_model_after_weight_loading(self, model, **kwargs):
         """No process required for torchao quantized model"""
         if self.quantization_config.quant_type == "autoquant":
@@ -298,10 +342,17 @@ class TorchAoHfQuantizer(HfQuantizer):
 
     def is_serializable(self, safe_serialization=None) -> bool:
         if safe_serialization:
-            logger.warning(
-                "torchao quantized model does not support safe serialization, please set `safe_serialization` to False"
-            )
-            return False
+            _is_torchao_serializable = type(
+                self.quantization_config.quant_type
+            ) in SUPPORTED_SAFE_SERIALIZATION_CONFIGS and TORCHAO_VERSION >= version.parse("0.14.0")
+            if not _is_torchao_serializable:
+                logger.warning(
+                    f"torchao quantized model only supports safe serialization for {SUPPORTED_SAFE_SERIALIZATION_CONFIGS}, \
+                    and torchao version >= 0.14.0, please set `safe_serialization` to False for \
+                    {type(self.quantization_config.quant_type)} and {TORCHAO_VERSION}."
+                )
+            return _is_torchao_serializable
+
         _is_torchao_serializable = version.parse(importlib.metadata.version("huggingface_hub")) >= version.parse(
             "0.25.0"
         )
@@ -315,14 +366,14 @@ class TorchAoHfQuantizer(HfQuantizer):
             return False
         return _is_torchao_serializable
 
-    def get_cuda_warm_up_factor(self):
+    def get_accelerator_warm_up_factor(self):
         """
-        This factor is used in caching_allocator_warmup to determine how many bytes to pre-allocate for CUDA warmup.
+        This factor is used in caching_allocator_warmup to determine how many bytes to pre-allocate for accelerator warmup.
         - A factor of 2 means we pre-allocate the full memory footprint of the model.
         - A factor of 4 means we pre-allocate half of that, and so on
 
         However, when using TorchAO, calculating memory usage with param.numel() * param.element_size() doesn't give the correct size for quantized weights (like int4 or int8)
-        That's because TorchAO internally represents quantized tensors using subtensors and metadata, and the reported element_size() still corresponds to the torch_dtype
+        That's because TorchAO internally represents quantized tensors using subtensors and metadata, and the reported element_size() still corresponds to the dtype
         not the actual bit-width of the quantized data.
 
         To correct for this:

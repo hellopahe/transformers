@@ -335,8 +335,6 @@ class BarkPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize the weights."""
         if isinstance(module, (nn.Linear,)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -387,7 +385,6 @@ class BarkCausalModel(BarkPreTrainedModel, GenerationMixin):
         self.drop = nn.Dropout(config.dropout)
 
         self.layers = nn.ModuleList([BarkBlock(config, is_causal=True, layer_idx=i) for i in range(config.num_layers)])
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         self.layernorm_final = nn.LayerNorm(config.hidden_size, bias=config.bias)
 
@@ -397,81 +394,48 @@ class BarkCausalModel(BarkPreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def get_output_embeddings(self):
+        # NOTE: get_output_embeddings() must return None to prevent accidental weight tying.
+        # See e.g. https://github.com/huggingface/transformers/pull/39339#discussion_r2219126400
+        return None
+
     def get_input_embeddings(self):
         return self.input_embeds_layer
 
     def set_input_embeddings(self, new_embeddings):
         self.input_embeds_layer = new_embeddings
 
-    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, cache_position=None, **kwargs):
-        # Overwritten -- bark has a model-specific hack
-        input_embeds = kwargs.get("input_embeds", None)
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        attention_mask=None,
+        input_embeds=None,
+        past_key_values=None,
+        position_ids=None,
+        use_cache=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        # Overwritten -- bark uses `input_embeds` not `inputS_embeds`
 
-        attention_mask = kwargs.get("attention_mask", None)
-        position_ids = kwargs.get("position_ids", None)
-
-        if cache_position[0] != 0:
-            # Omit tokens covered by past_key_values
-            seq_len = input_ids.shape[1]
-            past_length = past_key_values.get_seq_length()
-
-            # Some generation methods already pass only the last input ID
-            if input_ids.shape[1] > past_length:
-                remove_prefix_length = past_length
-            else:
-                # Default to old behavior: keep only final ID
-                remove_prefix_length = input_ids.shape[1] - 1
-
-            input_ids = input_ids[:, remove_prefix_length:]
-
-            # input_embeds have already been used and is not required anymore
-            input_embeds = None
-        else:
-            if input_embeds is not None and kwargs.get("use_cache"):
-                seq_len = input_embeds.shape[1]
-            else:
-                seq_len = input_ids.shape[1]
-
-        # ensure that attention_mask and position_ids shapes are aligned with the weird Bark hack of reducing
-        # sequence length on the first forward pass
-        if attention_mask is not None:
-            attention_mask = attention_mask[:, :seq_len]
-        if position_ids is not None:
-            position_ids = position_ids[:, :seq_len]
-
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
-                position_ids = position_ids[:, -input_ids.shape[1] :]
-        else:
-            position_ids = None
-
-        if input_embeds is not None and kwargs.get("use_cache"):
-            return {
-                "input_ids": None,
-                "input_embeds": input_embeds,
-                "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "position_ids": position_ids,
-                "attention_mask": attention_mask,
-                "cache_position": cache_position,
-            }
-        return {
-            "input_ids": input_ids,
-            "past_key_values": past_key_values,
-            "use_cache": kwargs.get("use_cache"),
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-            "cache_position": cache_position,
-        }
+        model_inputs = super().prepare_inputs_for_generation(
+            input_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=input_embeds,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        model_inputs["input_embeds"] = model_inputs.pop("inputs_embeds", None)
+        return model_inputs
 
     @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
-        past_key_values: Optional[tuple[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
@@ -531,17 +495,17 @@ class BarkCausalModel(BarkPreTrainedModel, GenerationMixin):
                 )
                 use_cache = False
 
-        return_legacy_cache = False
-        if use_cache and not isinstance(past_key_values, Cache):
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+        if use_cache and isinstance(past_key_values, tuple):
             logger.warning_once(
                 "Passing a tuple of `past_key_values` is deprecated and will be removed in Transformers v4.58.0. "
                 "You should pass an instance of `DynamicCache` instead, e.g. "
                 "`past_key_values=DynamicCache.from_legacy_cache(past_key_values)`."
             )
-            return_legacy_cache = True
             past_key_values = DynamicCache.from_legacy_cache(past_key_values)
 
-        past_length = past_key_values.get_seq_length() if past_key_values is not None else past_key_values
+        past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         if position_ids is None:
             position_ids = torch.arange(past_length, seq_length + past_length, dtype=torch.long, device=device)
@@ -553,7 +517,7 @@ class BarkCausalModel(BarkPreTrainedModel, GenerationMixin):
         if attention_mask is not None:
             if batch_size <= 0:
                 raise ValueError("batch_size has to be defined and > 0")
-            if self._use_flash_attention_2:
+            if self.config._attn_implementation == "flash_attention_2":
                 attention_mask = attention_mask if 0 in attention_mask else None
             else:
                 attention_mask = attention_mask.view(batch_size, -1)
@@ -602,9 +566,6 @@ class BarkCausalModel(BarkPreTrainedModel, GenerationMixin):
 
         logits = self.lm_head(hidden_states)
 
-        if return_legacy_cache:
-            past_key_values = past_key_values.to_legacy_cache()
-
         if not return_dict:
             return tuple(
                 v for v in [None, logits, past_key_values, all_hidden_states, all_self_attentions] if v is not None
@@ -632,7 +593,7 @@ class BarkSemanticModel(BarkCausalModel):
     def generate(
         self,
         input_ids: torch.Tensor,
-        semantic_generation_config: BarkSemanticGenerationConfig = None,
+        semantic_generation_config: Optional[BarkSemanticGenerationConfig] = None,
         history_prompt: Optional[dict[str, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
@@ -817,8 +778,8 @@ class BarkCoarseModel(BarkCausalModel):
     def generate(
         self,
         semantic_output: torch.Tensor,
-        semantic_generation_config: BarkSemanticGenerationConfig = None,
-        coarse_generation_config: BarkCoarseGenerationConfig = None,
+        semantic_generation_config: Optional[BarkSemanticGenerationConfig] = None,
+        coarse_generation_config: Optional[BarkCoarseGenerationConfig] = None,
         codebook_size: int = 1024,
         history_prompt: Optional[dict[str, torch.Tensor]] = None,
         return_output_lengths: Optional[bool] = None,
@@ -979,7 +940,6 @@ class BarkFineModel(BarkPreTrainedModel):
         self.layers = nn.ModuleList(
             [BarkBlock(config, is_causal=False, layer_idx=i) for i in range(config.num_layers)]
         )
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         self.layernorm_final = nn.LayerNorm(config.hidden_size)
 
@@ -1100,16 +1060,6 @@ class BarkFineModel(BarkPreTrainedModel):
         If the `torchscript` flag is set in the configuration, can't handle parameter sharing so we are cloning the
         weights instead.
         """
-        if getattr(self.config, "tie_word_embeddings", True):
-            self._tied_weights_keys = []
-            output_embeddings = self.get_output_embeddings()
-            input_embeddings = self.get_input_embeddings()
-
-            for i in range(self.config.n_codes_total - self.config.n_codes_given):
-                # self.input_embeds_layers[i + 1].weight = self.lm_heads[i].weight
-                self._tie_or_clone_weights(output_embeddings[i], input_embeddings[i + 1])
-                self._tied_weights_keys.append(f"lm_heads.{i}.weight")
-
         for module in self.modules():
             if hasattr(module, "_tie_weights"):
                 module._tie_weights()
@@ -1186,7 +1136,7 @@ class BarkFineModel(BarkPreTrainedModel):
         if attention_mask is not None:
             if batch_size <= 0:
                 raise ValueError("batch_size has to be defined and > 0")
-            if self._use_flash_attention_2:
+            if self.config._attn_implementation == "flash_attention_2":
                 attention_mask = attention_mask if 0 in attention_mask else None
             else:
                 # [bsz, to_seq_length] -> [bsz, 1, 1, to_seq_length]
@@ -1240,8 +1190,8 @@ class BarkFineModel(BarkPreTrainedModel):
     def generate(
         self,
         coarse_output: torch.Tensor,
-        semantic_generation_config: BarkSemanticGenerationConfig = None,
-        coarse_generation_config: BarkCoarseGenerationConfig = None,
+        semantic_generation_config: Optional[BarkSemanticGenerationConfig] = None,
+        coarse_generation_config: Optional[BarkCoarseGenerationConfig] = None,
         fine_generation_config: BarkFineGenerationConfig = None,
         codebook_size: int = 1024,
         history_prompt: Optional[dict[str, torch.Tensor]] = None,
@@ -1653,6 +1603,17 @@ class BarkModel(BarkPreTrainedModel):
             return audio, output_lengths
 
         return audio
+
+    def tie_weights(self):
+        """
+        Tie the weights between the input embeddings list and the output embeddings list.
+
+        If the `torchscript` flag is set in the configuration, can't handle parameter sharing so we are cloning the
+        weights instead.
+        """
+        for module in self.modules():
+            if hasattr(module, "_tie_weights"):
+                module._tie_weights()
 
 
 __all__ = [

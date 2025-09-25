@@ -68,14 +68,14 @@ class PerceptionLMConfig(PretrainedConfig):
         if isinstance(vision_config, dict):
             vision_config = TimmWrapperConfig(**vision_config)
         elif isinstance(vision_config, TimmWrapperConfig):
-            vision_config = vision_config
+            pass
         elif vision_config is None:
             vision_config = TimmWrapperConfig()
         self.vision_config = vision_config
         self.vision_use_cls_token = vision_use_cls_token
 
         if isinstance(text_config, dict):
-            text_config["model_type"] = text_config["model_type"] if "model_type" in text_config else "llama"
+            text_config["model_type"] = text_config.get("model_type", "llama")
             text_config = CONFIG_MAPPING[text_config["model_type"]](**text_config)
         elif text_config is None:
             text_config = CONFIG_MAPPING["llama"]()

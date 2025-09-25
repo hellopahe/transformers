@@ -76,7 +76,7 @@ class ChameleonModelTester:
         pad_token_id=0,
         vq_num_embeds=5,
         vq_embed_dim=5,
-        vq_channel_multiplier=[1, 4],
+        vq_channel_multiplier=[1, 2],
         vq_img_token_start_id=10,  # has to be less than vocab size when added with vq_num_embeds
         scope=None,
     ):
@@ -255,10 +255,6 @@ class ChameleonModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTester
     def test_batching_equivalence(self):
         pass
 
-    @unittest.skip("Chameleon VQ model cannot be squishes more due to hardcoded layer params in model code")
-    def test_model_is_small(self):
-        pass
-
 
 class ChameleonVision2SeqModelTester(ChameleonModelTester):
     def __init__(self, parent, image_size=10, **kwargs):
@@ -270,7 +266,7 @@ class ChameleonVision2SeqModelTester(ChameleonModelTester):
         input_ids = ids_tensor([self.batch_size, self.seq_length], self.vocab_size)
         input_ids[input_ids == self.image_token_id] = self.pad_token_id
         input_ids[:, : self.image_seq_length] = self.image_token_id
-        attention_mask = torch.tril(torch.ones_like(input_ids).to(torch_device))
+        attention_mask = input_ids.ne(self.pad_token_id).to(torch_device)
         pixel_values = floats_tensor([self.batch_size, 3, self.image_size, self.image_size])
 
         config = self.get_config()
@@ -321,8 +317,16 @@ class ChameleonVision2SeqModelTest(ModelTesterMixin, GenerationTesterMixin, unit
     def test_disk_offload_safetensors(self):
         pass
 
-    @unittest.skip("Chameleon VQ model cannot be squishes more due to hardcoded layer params in model code")
-    def test_model_is_small(self):
+    @unittest.skip("Chameleon applies key/query norm which doesn't work with packing")
+    def test_flash_attention_2_padding_matches_padding_free_with_position_ids(self):
+        pass
+
+    @unittest.skip("Chameleon applies key/query norm which doesn't work with packing")
+    def test_eager_padding_matches_padding_free_with_position_ids(self):
+        pass
+
+    @unittest.skip("Chameleon applies key/query norm which doesn't work with packing")
+    def test_sdpa_padding_matches_padding_free_with_position_ids(self):
         pass
 
     def test_mismatching_num_image_tokens(self):
@@ -334,6 +338,7 @@ class ChameleonVision2SeqModelTest(ModelTesterMixin, GenerationTesterMixin, unit
         config, input_dict = self.model_tester.prepare_config_and_inputs_for_common()
         for model_class in self.all_model_classes:
             model = model_class(config).to(torch_device)
+            model.eval()
             curr_input_dict = copy.deepcopy(input_dict)  # the below tests modify dict in-place
             _ = model(**curr_input_dict)  # successful forward with no modifications
 
